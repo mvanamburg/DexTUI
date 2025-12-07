@@ -1,0 +1,7 @@
+target/
+data/
+**/data/
+*.log
+.DS_Store
+node_modules/
+*.rs.bk
