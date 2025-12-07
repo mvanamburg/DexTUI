@@ -514,7 +514,7 @@ pub fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App)
                 )));
                 help_lines.push(Spans::from(Span::raw("Up/Down Navigate list")));
                 help_lines.push(Spans::from(Span::raw("r       Refresh fetch (background)")));
-                help_lines.push(Spans::from(Span::raw("?       Toggle this help modal")));
+                help_lines.push(Spans::from(Span::raw("F1 / h  Toggle this help modal")));
                 help_lines.push(Spans::from(Span::raw("")));
                 help_lines.push(Spans::from(Span::raw(
                     "Use arrow keys to navigate and Enter to focus details.",

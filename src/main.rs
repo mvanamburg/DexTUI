@@ -142,7 +142,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 } else {
                     match key.code {
                         KeyCode::Char('q') => break,
-                        KeyCode::Char('?') => {
+                        KeyCode::F(1) | KeyCode::Char('h') => {
                             app.show_help = !app.show_help;
                         }
                         KeyCode::Char('/') => {
