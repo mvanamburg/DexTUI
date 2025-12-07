@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::fetch::{fetch_and_cache, FetchState};
-use crate::ui::{draw_ui, App};
+use crate::ui::{draw_ui, App, SpriteThumb};
 use crate::utils::load_data;
 
 #[tokio::main]
@@ -88,6 +88,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
         } {
             app.all_pokemons = new;
             app.apply_filter();
+
+            // Preload compact thumbnails into the in-memory cache on a background
+            // thread so the first time the user views a Pokémon the UI doesn't
+            // block waiting for disk I/O. We generate small RGB thumbnails to
+            // keep memory usage low.
+            let cache_arc = app.sprite_cache.clone();
+            let ids: Vec<u32> = app.all_pokemons.iter().map(|p| p.pokedex).collect();
+            std::thread::spawn(move || {
+                const THUMB_W: u32 = 48;
+                const THUMB_H: u32 = 48;
+                for id in ids {
+                    let path = format!("data/sprites/{}.png", id);
+                    if let Ok(img) = image::open(&path) {
+                        let small = image::imageops::resize(&img.to_rgba8(), THUMB_W, THUMB_H, image::imageops::FilterType::Lanczos3);
+                        let mut pixels = Vec::with_capacity((THUMB_W * THUMB_H * 3) as usize);
+                        for y in 0..small.height() {
+                            for x in 0..small.width() {
+                                let p = small.get_pixel(x, y);
+                                pixels.push(p[0]);
+                                pixels.push(p[1]);
+                                pixels.push(p[2]);
+                            }
+                        }
+                        let thumb = SpriteThumb { w: THUMB_W, h: THUMB_H, pixels };
+                        let mut cache = cache_arc.lock().unwrap();
+                        cache.insert(id, thumb);
+                    }
+                }
+            });
         }
 
         let timeout = tick_rate

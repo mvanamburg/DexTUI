@@ -51,31 +51,5 @@ pub fn load_data(path: &str) -> Result<Vec<Pokemon>, Box<dyn Error>> {
     Ok(v)
 }
 
-pub fn load_sprite_pixels(id: u32, w: u32, h: u32) -> Option<Vec<Vec<(u8, u8, u8)>>> {
-    let path = format!("data/sprites/{}.png", id);
-    if let Ok(img) = image::open(&path) {
-        let img = img.to_rgba8();
-        let resized = image::imageops::resize(&img, w, h, image::imageops::FilterType::Lanczos3);
-        let mut rows: Vec<Vec<(u8, u8, u8)>> = Vec::new();
-        for y in 0..resized.height() {
-            let mut row = Vec::new();
-            for x in 0..resized.width() {
-                let p = resized.get_pixel(x, y);
-                row.push((p[0], p[1], p[2]));
-            }
-            rows.push(row);
-        }
-        Some(rows)
-    } else {
-        None
-    }
-}
-
-pub fn mock_ai_summary(p: &Pokemon) -> String {
-    // Small, predictable summary used for UI placeholders and demos.
-    let mut s = format!("{} (#{})\n", format_name(&p.name), p.pokedex);
-    s.push_str(&format!("Types: {}\n", p.types.join(", ")));
-    s.push_str(&format!("Short: {}\n", p.description));
-    s.push_str("Summary: A capable Pokémon with balanced attributes.");
-    s
-}
+// `mock_ai_summary` removed — AI-generated summary was optional and is not used
+// in the current UI. Keep other helpers small and focused.

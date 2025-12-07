@@ -1,6 +1,6 @@
 use crate::fetch::FetchState;
 use crate::models::Pokemon;
-use crate::utils::{format_name, load_sprite_pixels, mock_ai_summary, text_to_lines};
+use crate::utils::{format_name, text_to_lines};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,12 +10,19 @@ use ratatui::widgets::{
     Block, Borders, List, ListItem, Paragraph, Wrap,
 };
 use std::collections::HashMap;
-use image::GenericImageView;
 use image::imageops::FilterType;
 use ratatui::Terminal;
 use std::io;
 use std::io::Stdout;
 use std::sync::{Arc, Mutex};
+
+/// Compact RGB thumbnail stored in the in-memory cache.
+pub struct SpriteThumb {
+    pub w: u32,
+    pub h: u32,
+    /// RGB pixels in row-major order (len = w*h*3)
+    pub pixels: Vec<u8>,
+}
 
 pub struct App {
     pub all_pokemons: Vec<Pokemon>,
@@ -26,8 +33,10 @@ pub struct App {
     pub fetch_state: Option<Arc<Mutex<FetchState>>>,
     pub show_sprites: bool,
     pub show_help: bool,
-    // in-memory cache of original sprite images (loaded once from disk)
-    pub sprite_cache: HashMap<u32, image::RgbaImage>,
+    // in-memory cache of compact resized sprite thumbnails (RGB bytes).
+    // Use an Arc<Mutex<...>> so a background thread can populate the cache
+    // without blocking the UI thread.
+    pub sprite_cache: std::sync::Arc<std::sync::Mutex<HashMap<u32, SpriteThumb>>>,
 }
 
 impl App {
@@ -42,37 +51,92 @@ impl App {
             fetch_state: None,
             show_sprites: true,
             show_help: false,
-            sprite_cache: HashMap::new(),
+            sprite_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
-    /// Load sprite for `id` into memory (if not already) and return resized pixel rows.
-    pub fn get_sprite_pixels(&mut self, id: u32, w: u32, h: u32) -> Option<Vec<Vec<(u8, u8, u8)>>> {
-        if !self.sprite_cache.contains_key(&id) {
+    /// Load (or generate) a compact thumbnail for `id` and return pixel rows sized `w` x `h`.
+    ///
+    /// The cache stores a small thumbnail (e.g., 48x48 RGB). If the requested size
+    /// matches the cached thumb, we return its pixels directly. If the requested size
+    /// differs, we perform an in-memory resize from the cached thumbnail which is
+    /// much cheaper than reloading full images from disk.
+    pub fn get_sprite_pixels(&self, id: u32, w: u32, h: u32) -> Option<Vec<Vec<(u8, u8, u8)>>> {
+        const THUMB_W: u32 = 48;
+        const THUMB_H: u32 = 48;
+
+        // Attempt to get the thumbnail from cache; if missing, load and insert a thumb.
+        let mut cache = self.sprite_cache.lock().unwrap();
+        if !cache.contains_key(&id) {
             let path = format!("data/sprites/{}.png", id);
             if let Ok(img) = image::open(&path) {
-                let img = img.to_rgba8();
-                self.sprite_cache.insert(id, img);
+                // Resize to canonical thumbnail size and store RGB bytes.
+                let small = image::imageops::resize(&img.to_rgba8(), THUMB_W, THUMB_H, FilterType::Lanczos3);
+                let mut pixels = Vec::with_capacity((THUMB_W * THUMB_H * 3) as usize);
+                for y in 0..small.height() {
+                    for x in 0..small.width() {
+                        let p = small.get_pixel(x, y);
+                        pixels.push(p[0]);
+                        pixels.push(p[1]);
+                        pixels.push(p[2]);
+                    }
+                }
+                cache.insert(
+                    id,
+                    SpriteThumb {
+                        w: THUMB_W,
+                        h: THUMB_H,
+                        pixels,
+                    },
+                );
             } else {
                 return None;
             }
         }
 
-        if let Some(orig) = self.sprite_cache.get(&id) {
-            let resized = image::imageops::resize(orig, w, h, FilterType::Lanczos3);
-            let mut rows: Vec<Vec<(u8, u8, u8)>> = Vec::new();
+        // We have a thumbnail; if requested size equals thumb size, return directly.
+        if let Some(thumb) = cache.get(&id) {
+            // If exact match, iterate rows directly.
+            if thumb.w == w && thumb.h == h {
+                let mut rows: Vec<Vec<(u8, u8, u8)>> = Vec::with_capacity(h as usize);
+                for y in 0..h {
+                    let mut row = Vec::with_capacity(w as usize);
+                    let row_start = (y * w * 3) as usize;
+                    for x in 0..w {
+                        let idx = row_start + (x as usize) * 3;
+                        row.push((thumb.pixels[idx], thumb.pixels[idx + 1], thumb.pixels[idx + 2]));
+                    }
+                    rows.push(row);
+                }
+                return Some(rows);
+            }
+
+            // Otherwise, perform an in-memory resize from the thumbnail to the requested size.
+            // Build an ImageBuffer from the RGB bytes (add opaque alpha) and use image::resize.
+            let mut buf = image::RgbaImage::new(thumb.w, thumb.h);
+            for y in 0..thumb.h {
+                for x in 0..thumb.w {
+                    let idx = ((y * thumb.w + x) * 3) as usize;
+                    let r = thumb.pixels[idx];
+                    let g = thumb.pixels[idx + 1];
+                    let b = thumb.pixels[idx + 2];
+                    buf.put_pixel(x, y, image::Rgba([r, g, b, 255]));
+                }
+            }
+            let resized = image::imageops::resize(&buf, w, h, FilterType::Lanczos3);
+            let mut rows: Vec<Vec<(u8, u8, u8)>> = Vec::with_capacity(resized.height() as usize);
             for y in 0..resized.height() {
-                let mut row = Vec::new();
+                let mut row = Vec::with_capacity(resized.width() as usize);
                 for x in 0..resized.width() {
                     let p = resized.get_pixel(x, y);
                     row.push((p[0], p[1], p[2]));
                 }
                 rows.push(row);
             }
-            Some(rows)
-        } else {
-            None
+            return Some(rows);
         }
+
+        None
     }
 
     pub fn next(&mut self) {
@@ -91,14 +155,7 @@ impl App {
         }
     }
 
-    pub fn selected_pokemon(&self) -> Option<&Pokemon> {
-        if self.visible.is_empty() {
-            None
-        } else {
-            let idx = self.visible[self.selected_visible];
-            self.all_pokemons.get(idx)
-        }
-    }
+
 
     pub fn apply_filter(&mut self) {
         let q = self.search_query.to_lowercase();
@@ -426,13 +483,7 @@ pub fn draw_ui(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App)
                     right_text.push(Spans::from(Span::raw(line)));
                 }
                 right_text.push(Spans::from(Span::raw("")));
-                right_text.push(Spans::from(Span::styled(
-                    "AI Summary:",
-                    Style::default().fg(Color::Cyan),
-                )));
-                for line in text_to_lines(&mock_ai_summary(p), 60) {
-                    right_text.push(Spans::from(Span::raw(line)));
-                }
+                // AI Summary removed — leave space for potential replacement.
                 let right_para = Paragraph::new(right_text)
                     .block(Block::default().borders(Borders::ALL).title("Details"))
                     .wrap(Wrap { trim: true });
